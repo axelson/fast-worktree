@@ -1,0 +1,16 @@
+#!/bin/sh
+# Test shim for `pgrep`: reports a process "running" only when its pattern is
+# named in FW_TEST_RUNNING_PROCS (space-separated). Default: nothing running,
+# so the Caddy reload path is skipped unless a test opts in. Keeps the suite
+# from reading the real process table or reloading a developer's live Caddy.
+pattern=""
+for a in "$@"; do
+    case "$a" in
+        -*) ;;
+        *) pattern="$a" ;;
+    esac
+done
+case " ${FW_TEST_RUNNING_PROCS:-} " in
+    *" $pattern "*) exit 0 ;;
+esac
+exit 1

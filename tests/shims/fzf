@@ -1,0 +1,47 @@
+#!/bin/sh
+# Test shim for fzf: records what was offered and replays a canned selection so
+# the interactive pickers are exercised hermetically. The tool invokes fzf by
+# bare name; here every decision is env-driven.
+#   FW_TEST_FZF_LINES        — file to write the raw stdin (what was OFFERED)
+#   FW_TEST_FZF_LOG          — file to append each invocation's argv to
+#   FW_TEST_FZF_CANCEL       — when set, simulate an aborted picker (exit 130)
+#   FW_TEST_FZF_ERROR        — when set, simulate a real fzf failure (exit 2:
+#                              bad flag / no tty), distinct from a cancel
+#   FW_TEST_FZF_SELECT       — print the first stdin line containing this string
+#   FW_TEST_FZF_SELECT_LINES — newline-separated patterns; print the first
+#                              matching stdin line for each (multi-select)
+# With none of the select vars set the shim selects the first offered line.
+input=$(cat)
+
+if [ -n "${FW_TEST_FZF_LINES:-}" ]; then
+    printf '%s' "$input" >"$FW_TEST_FZF_LINES"
+fi
+if [ -n "${FW_TEST_FZF_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FW_TEST_FZF_LOG"
+fi
+
+if [ -n "${FW_TEST_FZF_CANCEL:-}" ]; then
+    exit 130
+fi
+
+if [ -n "${FW_TEST_FZF_ERROR:-}" ]; then
+    echo "fzf: unknown option (test-forced error)" >&2
+    exit 2
+fi
+
+if [ -n "${FW_TEST_FZF_SELECT_LINES:-}" ]; then
+    printf '%s\n' "$FW_TEST_FZF_SELECT_LINES" | while IFS= read -r pat; do
+        [ -n "$pat" ] || continue
+        printf '%s\n' "$input" | grep -F -m1 -- "$pat"
+    done
+    exit 0
+fi
+
+if [ -n "${FW_TEST_FZF_SELECT:-}" ]; then
+    printf '%s\n' "$input" | grep -F -m1 -- "$FW_TEST_FZF_SELECT"
+    exit 0
+fi
+
+# Default: behave like an immediate Enter on the first offered line.
+printf '%s\n' "$input" | head -1
+exit 0

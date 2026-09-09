@@ -1,0 +1,4 @@
+#!/bin/sh
+# Test shim for `dnsmasq`: its mere presence on PATH makes the caddy-setup
+# prerequisite check treat dnsmasq as installed. Never actually runs a resolver.
+exit 0

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Test shim for macOS `osascript` (used for desktop notifications): never posts
+# a real notification; records the argv so tests can assert one was requested.
+#   FW_TEST_OSASCRIPT_LOG — file to append each invocation's argv to
+if [ -n "${FW_TEST_OSASCRIPT_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FW_TEST_OSASCRIPT_LOG"
+fi
+exit 0

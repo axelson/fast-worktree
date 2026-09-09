@@ -1,0 +1,5 @@
+#!/bin/sh
+# Shellcheck gate for fast-worktree. Single source of truth for the file
+# list — docs point here instead of repeating it.
+cd "$(dirname "$0")/.."
+exec shellcheck -s bash fast-worktree lib/*.sh lib/stack/*.sh

@@ -1,0 +1,52 @@
+#!/bin/sh
+# Test shim for the Graphite CLI: records the invocation, does nothing by
+# default. Env knobs:
+#   FW_TEST_GT_LOG           — file to append each invocation to
+#   FW_TEST_GT_GET_CHECKOUT  — when set, `gt get <branch>` simulates the real
+#                              gt behavior of checking the branch out in cwd
+#   FW_TEST_GT_RESTACK_FAIL  — substring; `gt --cwd <dir> restack --downstack`
+#                              exits nonzero when <dir> contains it (simulates a
+#                              rebase conflict). Cleanup is the standalone
+#                              `gt abort` (`-f` skips its prompt); `gt restack
+#                              --abort` is not a real command and errors here,
+#                              matching real gt.
+if [ -n "${FW_TEST_GT_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FW_TEST_GT_LOG"
+fi
+
+# `restack --abort` is not a real Graphite subcommand — real gt rejects it.
+# Model that so a regression back to it can't hide behind a swallowed error.
+case " $* " in
+    *" restack --abort "*)
+        echo "gt: unknown option '--abort' for restack (did you mean 'gt abort'?)" >&2
+        exit 1
+        ;;
+esac
+
+if [ "$1" = "get" ] && [ -n "${FW_TEST_GT_GET_CHECKOUT:-}" ]; then
+    branch="$2"
+    # Real `gt get` obtains the branch (and its downstack) from the remote; a
+    # branch that isn't on the remote can't be gotten, so error like gt does.
+    if git fetch -q origin "$branch" 2>/dev/null; then
+        git checkout -q "$branch" 2>/dev/null ||
+            git checkout -q -b "$branch" "origin/$branch" 2>/dev/null
+    else
+        echo "gt get: branch $branch not found on the remote" >&2
+        exit 1
+    fi
+fi
+
+# Simulate a restack conflict on a targeted worktree. The full invocation looks
+# like: --cwd <dir> restack --downstack
+if [ -n "${FW_TEST_GT_RESTACK_FAIL:-}" ] && [ "$1" = "--cwd" ]; then
+    cwd="$2"
+    case " $* " in
+        *" restack --downstack "*)
+            case "$cwd" in
+                *"$FW_TEST_GT_RESTACK_FAIL"*) exit 1 ;;
+            esac
+            ;;
+    esac
+fi
+
+exit 0

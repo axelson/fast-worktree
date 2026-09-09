@@ -1,0 +1,2 @@
+# Configs are user-authored sourced bash — shellcheck can't follow them.
+disable=SC1090,SC1091

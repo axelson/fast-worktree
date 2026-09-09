@@ -1,0 +1,25 @@
+#!/bin/sh
+# Test shim for the Claude Code CLI. Records invocations and replays canned
+# agent data so the suite stays hermetic (never talks to a real Claude).
+#   FW_TEST_CLAUDE_LOG          — file to append each invocation to
+#   FW_TEST_CLAUDE_AGENTS_JSON  — JSON array returned for `claude agents --json`
+#   FW_TEST_CLAUDE_AGENTS_EXIT  — exit code for `claude agents --json` (default 0)
+if [ -n "${FW_TEST_CLAUDE_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FW_TEST_CLAUDE_LOG"
+fi
+
+case "$1" in
+    agents)
+        code="${FW_TEST_CLAUDE_AGENTS_EXIT:-0}"
+        if [ "$code" != "0" ]; then
+            exit "$code"
+        fi
+        printf '%s\n' "${FW_TEST_CLAUDE_AGENTS_JSON:-[]}"
+        exit 0
+        ;;
+esac
+
+# Any other invocation (an interactive launch like `claude /pr-review`) just
+# records itself and exits — a real session would block, but tests only need
+# to observe that it was launched with the right prompt.
+exit 0

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Test shim for the macOS `say` (text-to-speech): never speaks; records the
+# spoken message so tests can assert a notification was voiced.
+#   FW_TEST_SAY_LOG — file to append each spoken message to
+if [ -n "${FW_TEST_SAY_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FW_TEST_SAY_LOG"
+fi
+exit 0

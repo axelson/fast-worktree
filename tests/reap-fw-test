@@ -1,0 +1,23 @@
+#!/bin/sh
+# Reap orphaned fw-test tmux servers (and their stale socket files).
+#
+# The post-run sweep in tests/run only reaps the current run's tagged sockets,
+# and only when its EXIT trap fires. Two leaks slip past it: a SIGKILLed runner
+# (trap never runs) and `bats` run directly (FW_TEST_SOCK_TAG unset, so the
+# shim makes untagged fw-test-<cksum> sockets). This reaper closes both.
+#
+# Age-gated for safety: each fw-test server belongs to a single test whose life
+# is capped by BATS_TEST_TIMEOUT, so any fw-test socket older than the threshold
+# is provably an orphan — never a live concurrent run. Matches fw-test-* only,
+# so the user's `default` socket is untouchable by construction.
+min_age="${FW_TEST_REAP_MIN_AGE:-10}"   # minutes
+sockdir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
+[ -d "$sockdir" ] || exit 0
+
+find "$sockdir" -maxdepth 1 -name 'fw-test-*' -mmin +"$min_age" 2>/dev/null |
+    while IFS= read -r sock; do
+        name=$(basename "$sock")
+        tmux -L "$name" kill-server 2>/dev/null
+        rm -f "$sock"
+    done
+exit 0

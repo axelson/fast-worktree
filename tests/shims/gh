@@ -1,0 +1,144 @@
+#!/bin/sh
+# Test shim for the GitHub CLI: records invocations and replays canned data.
+# The tool invokes gh by bare name (from the repo dir, so real gh infers the
+# repo); here every response is driven by env vars so tests stay hermetic.
+#   FW_TEST_GH_LOG          — file to append each invocation to
+#   FW_TEST_GH_PR_BRANCH    — headRefName returned for `gh pr view … headRefName`
+#   FW_TEST_GH_PR_NUMBER    — number returned for `gh pr view … --json number --jq`
+#   FW_TEST_GH_PR_JSON      — JSON body for `gh pr view … --json <fields>` (info/prs)
+#   FW_TEST_GH_PR_LIST_JSON — JSON array for `gh pr list --json <fields>` (prs)
+#   FW_TEST_GH_CHECKS_JSON  — JSON array for `gh pr checks … --json`
+#   FW_TEST_GH_CHECKS_EXIT  — exit code for `gh pr checks` (1 => "no checks reported")
+#   FW_TEST_GH_CHECKS_COUNTER — file tracking `pr checks` call count; when set,
+#                             FW_TEST_GH_CHECKS_JSON<N>/FW_TEST_GH_CHECKS_EXIT<N>
+#                             override the response on the Nth call (for polling)
+#   FW_TEST_GH_GRAPHQL_JSON — JSON for `gh api graphql`
+#   FW_TEST_GH_COMMENT_JSON — JSON for `gh api …/pulls/comments/<id>`
+#   FW_TEST_GH_THREAD_JSON  — JSON for `gh api …/pulls/<n>/comments`
+#   FW_TEST_GH_NWO          — nameWithOwner for `gh repo view --json nameWithOwner`
+#   FW_TEST_GH_COLLABORATORS_JSON — JSON array for
+#                             `gh api repos/{owner}/{repo}/collaborators` (assign fallback)
+#   FW_TEST_GH_COLLABORATORS_EXIT — nonzero => the collaborators API call fails
+#                             (exits with this code, writing to stderr)
+if [ -n "${FW_TEST_GH_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FW_TEST_GH_LOG"
+fi
+
+# Parse the value following --jq (a real jq filter) out of argv so the shim can
+# honor projections like `--jq '.url'` instead of dumping the whole JSON blob.
+jq_filter=""
+prev=""
+for a in "$@"; do
+    [ "$prev" = "--jq" ] && jq_filter="$a"
+    prev="$a"
+done
+
+case "$*" in
+    *"pr view"*headRefName*)
+        if [ -n "${FW_TEST_GH_PR_BRANCH:-}" ]; then
+            case "$*" in
+                *--jq*) printf '%s\n' "$FW_TEST_GH_PR_BRANCH" ;;
+                *) printf '{"headRefName":"%s"}\n' "$FW_TEST_GH_PR_BRANCH" ;;
+            esac
+            exit 0
+        fi
+        echo "no such pull request" >&2
+        exit 1
+        ;;
+    *"pr view"*"--json number")
+        # Single-field number lookup (fw fetches `--json number`, extracts with
+        # local jq). Matches only when the field list is exactly "number".
+        if [ -n "${FW_TEST_GH_PR_NUMBER:-}" ]; then
+            printf '{"number":%s}\n' "$FW_TEST_GH_PR_NUMBER"
+            exit 0
+        fi
+        echo "no pull requests found for branch" >&2
+        exit 1
+        ;;
+    *"pr list"*--json*)
+        if [ -n "${FW_TEST_GH_PR_LIST_JSON:-}" ]; then
+            if [ -n "$jq_filter" ]; then
+                printf '%s\n' "$FW_TEST_GH_PR_LIST_JSON" | jq -r "$jq_filter"
+            else
+                printf '%s\n' "$FW_TEST_GH_PR_LIST_JSON"
+            fi
+            exit 0
+        fi
+        printf '[]\n'
+        exit 0
+        ;;
+    *"pr view"*--json*)
+        if [ -n "${FW_TEST_GH_PR_JSON:-}" ]; then
+            if [ -n "$jq_filter" ]; then
+                printf '%s\n' "$FW_TEST_GH_PR_JSON" | jq -r "$jq_filter"
+            else
+                printf '%s\n' "$FW_TEST_GH_PR_JSON"
+            fi
+            exit 0
+        fi
+        echo "no pull requests found for branch" >&2
+        exit 1
+        ;;
+    *"pr checks"*--json*)
+        # Per-call overrides (FW_TEST_GH_CHECKS_JSON<N>/_EXIT<N>) let a test
+        # script a polling sequence; without the counter it's a single response.
+        n=1
+        if [ -n "${FW_TEST_GH_CHECKS_COUNTER:-}" ]; then
+            n=0
+            [ -f "$FW_TEST_GH_CHECKS_COUNTER" ] && n=$(cat "$FW_TEST_GH_CHECKS_COUNTER")
+            n=$((n + 1))
+            printf '%s' "$n" >"$FW_TEST_GH_CHECKS_COUNTER"
+        fi
+        eval "exit_code=\${FW_TEST_GH_CHECKS_EXIT${n}:-\${FW_TEST_GH_CHECKS_EXIT:-0}}"
+        eval "json=\${FW_TEST_GH_CHECKS_JSON${n}:-}"
+        [ -n "$json" ] || json="${FW_TEST_GH_CHECKS_JSON:-[]}"
+        if [ "$exit_code" != "0" ]; then
+            echo "no checks reported on the 'branch' branch" >&2
+            exit "$exit_code"
+        fi
+        printf '%s\n' "$json"
+        exit 0
+        ;;
+    *"api graphql"*)
+        # A brace default (${VAR:-{}}) would leak a stray '}', so default
+        # via a temporary instead.
+        graphql="${FW_TEST_GH_GRAPHQL_JSON}"
+        [ -n "$graphql" ] || graphql='{}'
+        printf '%s\n' "$graphql"
+        exit 0
+        ;;
+    *"repo view"*nameWithOwner*)
+        printf '%s\n' "${FW_TEST_GH_NWO:-owner/repo}"
+        exit 0
+        ;;
+    *"run rerun"*)
+        exit 0
+        ;;
+    *api*collaborators*)
+        if [ -n "${FW_TEST_GH_COLLABORATORS_EXIT:-}" ] && [ "$FW_TEST_GH_COLLABORATORS_EXIT" != "0" ]; then
+            echo "gh: could not list collaborators (HTTP 403)" >&2
+            exit "$FW_TEST_GH_COLLABORATORS_EXIT"
+        fi
+        json="${FW_TEST_GH_COLLABORATORS_JSON:-[]}"
+        if [ -n "$jq_filter" ]; then
+            printf '%s\n' "$json" | jq -r "$jq_filter"
+        else
+            printf '%s\n' "$json"
+        fi
+        exit 0
+        ;;
+    *api*pulls*comments*)
+        # Single comment lookup ends in /comments/<id>; thread list ends in
+        # /pulls/<n>/comments.
+        case "$*" in
+            */comments/*|*comments/[0-9]*)
+                comment="${FW_TEST_GH_COMMENT_JSON}"
+                [ -n "$comment" ] || comment='{}'
+                printf '%s\n' "$comment" ;;
+            *)
+                printf '%s\n' "${FW_TEST_GH_THREAD_JSON:-[]}" ;;
+        esac
+        exit 0
+        ;;
+esac
+exit 0

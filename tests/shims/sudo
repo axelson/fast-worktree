@@ -1,0 +1,15 @@
+#!/bin/sh
+# Test shim for `sudo`: records each privileged invocation and no-ops, so the
+# suite never touches /etc/resolver, restarts dnsmasq, or prompts for a password.
+#   FW_TEST_SUDO_LOG — file each invocation ("$*") is appended to.
+# `sudo tee FILE` reads stdin: drain it so the upstream `echo … |` doesn't take
+# a SIGPIPE (which pipefail would turn into a spurious failure).
+if [ "$1" = tee ]; then
+    cat >/dev/null 2>&1 || true
+fi
+if [ -n "${FW_TEST_SUDO_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FW_TEST_SUDO_LOG"
+fi
+# FW_TEST_SUDO_EXIT lets a test simulate an aborted/failed sudo (wrong password,
+# Ctrl-C) to prove the caller stays re-runnable.
+exit "${FW_TEST_SUDO_EXIT:-0}"

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Test shim for `brew`: keeps the suite off the real Homebrew.
+#   brew --prefix            -> FW_TEST_BREW_PREFIX (default /opt/homebrew), so
+#                               tests point etc/ (dnsmasq.conf, the aggregation
+#                               Caddyfile) at a scratch dir and assert real writes.
+#   FW_TEST_BREW_LOG         -> file each non-prefix invocation is appended to.
+# Everything else is a no-op success.
+case "$1" in
+    --prefix) echo "${FW_TEST_BREW_PREFIX:-/opt/homebrew}"; exit 0 ;;
+esac
+if [ -n "${FW_TEST_BREW_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FW_TEST_BREW_LOG"
+fi
+exit 0

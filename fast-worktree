@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+#
+# fast-worktree — git worktree manager built around a golden build:
+# keep the main checkout compiled, then create near-instant worktrees by
+# CoW-cloning build artifacts and template-cloning the database.
+set -euo pipefail
+
+# This block runs under whatever bash the shebang found — possibly 3.2 —
+# so everything in it must stay bash-3.2-compatible.
+if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+    if [[ -z "${FW_BASH_REEXEC:-}" ]]; then
+        while IFS= read -r candidate; do
+            # shellcheck disable=SC2016  # must expand in the candidate bash
+            if [[ "$("$candidate" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)" -ge 4 ]]; then
+                FW_BASH_REEXEC=1 exec "$candidate" "$0" "$@"
+            fi
+        done < <(type -ap bash)
+    fi
+    echo "Error: fast-worktree requires bash >= 4 (found $BASH_VERSION)" >&2
+    echo "macOS: brew install bash, and ensure it precedes /bin on your PATH" >&2
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+# Absolute path to this very script, resolved through the `fw` symlink and the
+# bash-3.2 re-exec (which preserves $0). The two-phase `fw switch` picker's fzf
+# reload binding invokes fast-worktree in a fresh process and must use the same
+# binary as the running picker, not whatever `fw` happens to be on PATH.
+FW_SELF="$(realpath "$0")"
+export FW_SELF
+source "$SCRIPT_DIR/lib/colors.sh"
+source "$SCRIPT_DIR/lib/config.sh"
+source "$SCRIPT_DIR/lib/hooks.sh"
+source "$SCRIPT_DIR/lib/fzf.sh"
+source "$SCRIPT_DIR/lib/project.sh"
+source "$SCRIPT_DIR/lib/init.sh"
+source "$SCRIPT_DIR/lib/envfile.sh"
+source "$SCRIPT_DIR/lib/cow.sh"
+source "$SCRIPT_DIR/lib/db.sh"
+source "$SCRIPT_DIR/lib/worktree.sh"
+source "$SCRIPT_DIR/lib/run.sh"
+source "$SCRIPT_DIR/lib/clean.sh"
+source "$SCRIPT_DIR/lib/list.sh"
+source "$SCRIPT_DIR/lib/switch.sh"
+source "$SCRIPT_DIR/lib/switchclaude.sh"
+source "$SCRIPT_DIR/lib/archive.sh"
+source "$SCRIPT_DIR/lib/pull.sh"
+source "$SCRIPT_DIR/lib/changes.sh"
+source "$SCRIPT_DIR/lib/merge.sh"
+source "$SCRIPT_DIR/lib/sync.sh"
+source "$SCRIPT_DIR/lib/stack.sh"
+source "$SCRIPT_DIR/lib/gh.sh"
+source "$SCRIPT_DIR/lib/ticket.sh"
+source "$SCRIPT_DIR/lib/caddy.sh"
+source "$SCRIPT_DIR/lib/caddycmd.sh"
+source "$SCRIPT_DIR/lib/claude.sh"
+source "$SCRIPT_DIR/lib/skills.sh"
+source "$SCRIPT_DIR/lib/usage.sh"
+source "$SCRIPT_DIR/lib/notify.sh"
+source "$SCRIPT_DIR/lib/handoff.sh"
+source "$SCRIPT_DIR/lib/openfile.sh"
+source "$SCRIPT_DIR/lib/configcmd.sh"
+source "$SCRIPT_DIR/lib/menu.sh"
+source "$SCRIPT_DIR/lib/copy.sh"
+source "$SCRIPT_DIR/lib/complete.sh"
+source "$SCRIPT_DIR/lib/setup.sh"
+source "$SCRIPT_DIR/lib/stack/none.sh"
+source "$SCRIPT_DIR/lib/stack/graphite.sh"
+source "$SCRIPT_DIR/lib/stack/present.sh"
+
+usage() {
+    cat <<EOF
+Usage: fast-worktree [-p PROJECT] <command> [args]
+
+Commands:
+    setup [--name N]  Install fish completions + a global config template
+    init [name]       Register the current repo as a project
+    projects          List registered projects
+    config            Show the project's config file paths (layers, precedence: last wins)
+    config open [--global|--repo|--project]   Edit a config file (default: project)
+    config show [--global|--repo|--project]   Effective merged config, or one file raw
+    config set [--global|--repo|--project] KEY VALUE   Set a scalar config value (default: project)
+    config get [--global|--repo|--project] KEY         Read a config value (default: effective merged)
+    config unset [--global|--repo|--project] KEY       Remove a scalar config value (default: project)
+    switch-project [name] (sp)  Open another project's main checkout session (fzf picker with no name)
+    create <name> [--base BRANCH|.] [--model M] [--claude PROMPT] [--no-switch]  Create a worktree (branch <prefix>/<name>) with cloned assets, and switch into it (--base=. stacks on the current branch)
+    delete [--force] <name|branch>  Remove a worktree and its branch
+    merge [--no-ff|--ff-only] [-y] [--no-sync] <name|branch>  Merge the worktree's branch into the main worktree, delete the worktree, then sync if on trunk (--no-sync skips)
+    list              List worktrees with branch and dirty markers
+    info [name]       Show a worktree's configuration
+    refresh [name]    Re-clone build artifacts from the golden checkout
+    regen-env [name]  Rewrite the worktree env file (keeps the port slot)
+    stop [name...]    Kill processes listening on a worktree's ports
+    start [name]      Run the project's start_cmd in the worktree
+    check [name]      Run the project's check_cmd in the worktree
+    fix [name]        Run the project's fix_cmd in the worktree
+    db [name]         Open a psql session on the worktree's database
+    clean [--cache]   Remove merged/deleted-upstream worktrees (--cache: clear cache_dirs and exit)
+    switch [name|branch] [--all] (sw)  Switch to a worktree (fzf picker with no name)
+    switch-claude [--project-only] (sc)  Pick and switch to a live Claude session (fzf picker; all projects, or --project-only for the current one)
+    stack-switch (ss) Switch to a worktree in the current branch stack (fzf picker)
+    tmux-open [name]  Attach or create the worktree's tmux session
+    last              Switch to the previously visited worktree
+    menu              fzf quick-actions menu (config: menu_extra_entries, menu_order)
+    copy [item] [name|branch]  Copy a worktree fact to the clipboard (bare: fzf picker; items: branch, path, pr-link, pr-number, ticket-url, stack-branch)
+    archive --reason TEXT [name]  Remove the worktree, keep the branch
+    restore <name|branch>         Recreate an archived worktree
+    purge [name|branch]           Permanently delete an archived branch (bare: interactive multi-select)
+    list --archived               List archived worktrees
+    pull <branch|PR#|URL> [--model M] [--claude PROMPT] [--no-switch]  Create a worktree from a remote or local branch or PR, and switch into it
+    changes [--stat] [name]       Diff the worktree against its stack parent
+    stack             Show the current branch stack
+    up | down         Switch to the branch above / below in the stack
+    top | bottom      Switch to the tip / base of the stack
+    restack [--all]   Rebase the current branch and below (--all: the whole stack)
+    sync [hook-flags] Fast-forward trunk and rebuild the golden checkout
+    prs [--merged|--closed] [--open]  List worktrees with their PR status; --open picks PRs to open
+    open [name]       Open the worktree's web URL (https://<name>.<domain> or http://localhost:<port>)
+    caddy setup [--domain D] | remove  Enable (or reverse) local HTTPS for this project (macOS; see docs/caddy.md)
+    pr [open|info|assign] [name|branch]  Open a PR in the browser (default) or show its details
+    pr assign [user] [name|branch]  Assign a GitHub user to the PR (roster: team_members, else collaborators)
+    checks [name|branch] [--open]  Show CI check results; --open picks failed checks to open
+    checks-wait [name|branch]  Poll CI checks until they finish
+    retry [name|branch]      Rerun failed CI workflow runs for a PR
+    ci [name|branch] [--all] CI status across recent worktrees' PRs
+    comments <id|url>        Show a GitHub review comment thread
+    ticket [name|branch]     Open the branch's issue-tracker ticket (config: ticket_pattern, ticket_url)
+    claude [--active] [--json]  Show running Claude instances by worktree
+    sessions close-old [--days N]  Close stale Claude sessions (summarize first)
+    skills [--user-skills|--repo-skills] [--auto|--manual] [show <name>]  List/show Claude skills
+    usage [<worktree>|<path>|summary|sync]  Claude Code token usage by worktree, with a subagent
+                      breakdown (--since, --period, --category, --weight, --json)
+    shelve [-t DURATION] [--project] [name...]  Push worktree(s) down the switch list (default 1d; e.g. 10m, 2h, 3d); --project/-p shelves registered project(s) in the 'sp' list instead
+    open-file [name]  Pick an untracked .md/.html file and open it (.md in \$editor/\$EDITOR, .html in the browser)
+    handoff save <file> | show | done | resume  Manage handoff docs for resuming work later
+    handoffs [--all] [--grep TEXT]   List saved handoffs (last 7 days by default)
+    notify <category> <message>      Log and announce a notification (macOS voice/alert; log-only elsewhere)
+    logs [category] [--all] (log)    Show the notification log (last 16h; --all for full history)
+    help              Show this help
+
+Any other command dispatches to the first matching executable in:
+    $(fw_config_dir)/projects/<project>/commands/
+    $(fw_config_dir)/commands/
+
+Use --help-internal to list internal commands used by scripts and completions.
+EOF
+}
+
+# Internal commands (underscore-prefixed) are called by scripts, completions,
+# and fw itself — never documented in the user-facing usage() above.
+usage_internal() {
+    cat <<EOF
+Internal commands (not for direct use — called by scripts and completions):
+
+    _complete <what>
+        Emit newline-separated shell-completion candidates for <what>:
+        worktrees, commands, prompt-flags, claude-models, handoffs,
+        archived, projects, config-keys, stack-backends. Called by:
+        completions/fast-worktree.fish
+
+    _switch-data [--all]
+        Emit the enriched column rows for the two-phase 'fw switch' picker:
+        name, last-viewed age, commit age, Claude status, summary, branch,
+        with a trailing tab-delimited worktree-name key. Called by: cmd_switch's
+        fzf 'load' reload (with FW_COLOR=always so piped rows keep color).
+
+    _create-bg <name>
+        Run the background half of 'fw create' (hook_post_create + artifact
+        recording) for an already-created worktree. Called by: cmd_create, via
+        tmux send-keys into the new session's first window, so the switch need
+        not wait on a slow hook_post_create.
+
+    _switch-refresh --secs <N> --cache <file> [--all]
+        Caching+pacing wrapper around _switch-data for the picker's refresh loop:
+        regenerate at most once per <N> seconds, serving the per-picker <cache>
+        in between. Called by: cmd_switch's fzf 'load' reload when
+        switch_refresh_secs > 0.
+
+    _switch-claude-data [--project <name>]
+        Emit the nested project->worktree->session rows for the 'fw switch-claude'
+        picker (same rows as the initial paint). Cross-project by default;
+        --project <name> scopes to one project (the --project-only picker's
+        reload) and re-emits the placeholder when it has no sessions. Called by:
+        cmd_switch_claude's fzf 'load' reload (with FW_COLOR=always so piped rows
+        keep color).
+
+    _switch-claude-refresh --secs <N> --cache <file> [--project <name>]
+        Caching+pacing wrapper around _switch-claude-data for switch-claude's
+        refresh loop: re-read the live registry at most once per <N> seconds,
+        serving the per-picker <cache> in between. --project <name> forwards the
+        --project-only scope. Called by: cmd_switch_claude's fzf 'load' reload
+        when switch_claude_refresh_secs > 0.
+EOF
+}
+
+# _require_project — resolve the active project, load its config, and pick
+# the stack backend.
+_require_project() {
+    local proj
+    proj="$(resolve_project "$PROJECT_FLAG")"
+    load_config "$proj"
+    resolve_stack_backend
+}
+
+# _dispatch_custom <cmd> [args…] — git-style external subcommand lookup.
+_dispatch_custom() {
+    local cmd="$1"
+    shift
+
+    _require_project
+    local proj="$project"
+
+    local cfg_dir candidate
+    cfg_dir="$(fw_config_dir)"
+    for candidate in "$cfg_dir/projects/$proj/commands/$cmd" "$cfg_dir/commands/$cmd"; do
+        if [[ -x "$candidate" ]]; then
+            # shellcheck disable=SC2031  # repo_root is set by load_config in this shell
+            _export_fw_project_env
+            exec "$candidate" "$@"
+        fi
+    done
+
+    echo "Error: Unknown command '$cmd'" >&2
+    usage >&2
+    exit 1
+}
+
+main() {
+    PROJECT_FLAG=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p|--project)
+                PROJECT_FLAG="${2:?Error: $1 requires a project name}"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --help-internal)
+                usage_internal
+                exit 0
+                ;;
+            -*)
+                echo "Error: Unknown flag '$1'" >&2
+                usage >&2
+                exit 1
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    if [[ $# -eq 0 ]]; then
+        usage >&2
+        exit 1
+    fi
+
+    local cmd="$1"
+    shift
+
+    case "$cmd" in
+        setup)    cmd_setup "$@" ;;
+        init)     cmd_init "$@" ;;
+        projects) list_projects ;;
+        config)   cmd_config "$@" ;;
+        switch-project | sp) cmd_switch_project "$@" ;;
+        create)   _require_project; cmd_create "$@" ;;
+        delete)   _require_project; cmd_delete "$@" ;;
+        merge)    _require_project; cmd_merge "$@" ;;
+        list)     _require_project; cmd_list "$@" ;;
+        info)     _require_project; cmd_info "$@" ;;
+        refresh)  _require_project; cmd_refresh "$@" ;;
+        regen-env) _require_project; cmd_regen_env "$@" ;;
+        stop)     _require_project; cmd_stop "$@" ;;
+        start)    _require_project; cmd_start "$@" ;;
+        check)    _require_project; cmd_check "$@" ;;
+        fix)      _require_project; cmd_fix "$@" ;;
+        db)       _require_project; cmd_db "$@" ;;
+        clean)    _require_project; cmd_clean "$@" ;;
+        switch | sw) _require_project; cmd_switch "$@" ;;
+        switch-claude | sc) cmd_switch_claude "$@" ;;
+        _switch-data) _require_project; cmd_switch_data "$@" ;;
+        _create-bg)   _require_project; cmd_create_bg "$@" ;;
+        _switch-refresh) _require_project; cmd_switch_refresh "$@" ;;
+        _switch-claude-data) cmd_switch_claude_data "$@" ;;
+        _switch-claude-refresh) cmd_switch_claude_refresh "$@" ;;
+        stack-switch | ss) _require_project; cmd_stack_switch "$@" ;;
+        menu)     _require_project; cmd_menu "$@" ;;
+        copy)     _require_project; cmd_copy "$@" ;;
+        tmux-open)   _require_project; cmd_tmux_open "$@" ;;
+        last)        _require_project; cmd_last "$@" ;;
+        archive)     _require_project; cmd_archive "$@" ;;
+        restore)     _require_project; cmd_restore "$@" ;;
+        purge)       _require_project; cmd_purge "$@" ;;
+        pull)        _require_project; cmd_pull "$@" ;;
+        changes)     _require_project; cmd_changes "$@" ;;
+        stack)    _require_project; cmd_stack "$@" ;;
+        up)       _require_project; cmd_up "$@" ;;
+        down)     _require_project; cmd_down "$@" ;;
+        top)      _require_project; cmd_top "$@" ;;
+        bottom)   _require_project; cmd_bottom "$@" ;;
+        restack)  _require_project; cmd_restack "$@" ;;
+        sync)     _require_project; cmd_sync "$@" ;;
+        open)     _require_project; cmd_open "$@" ;;
+        caddy)    _require_project; cmd_caddy "$@" ;;
+        prs)      _require_project; cmd_prs "$@" ;;
+        pr)       _require_project; cmd_pr "$@" ;;
+        checks)   _require_project; cmd_checks "$@" ;;
+        checks-wait) _require_project; cmd_checks_wait "$@" ;;
+        retry)    _require_project; cmd_retry "$@" ;;
+        ci)       _require_project; cmd_ci "$@" ;;
+        comments) _require_project; cmd_comments "$@" ;;
+        ticket)   _require_project; cmd_ticket "$@" ;;
+        claude)   _require_project; cmd_claude "$@" ;;
+        sessions) _require_project; cmd_sessions "$@" ;;
+        skills)   _require_project; cmd_skills "$@" ;;
+        # No _require_project: usage is machine-wide, and the report still
+        # exists where no project does. cmd_usage resolves one when it can.
+        usage)    cmd_usage "$@" ;;
+        shelve)   cmd_shelve "$@" ;;
+        open-file) _require_project; cmd_open_file "$@" ;;
+        handoff)  _require_project; cmd_handoff "$@" ;;
+        handoffs) _require_project; cmd_handoff_list "$@" ;;
+        notify)   _require_project; cmd_notify "$@" ;;
+        logs | log) _require_project; cmd_logs "$@" ;;
+        help)     usage ;;
+        _complete)
+            # Completion data source. `projects` and unknown kinds are
+            # project-independent; the rest need the active project loaded
+            # (respecting -p). A missing project yields no candidates, silently.
+            case "${1:-}" in
+                projects | config-keys | stack-backends) cmd_complete "$@" ;;
+                worktrees | commands | prompt-flags | claude-models | handoffs | archived)
+                    _require_project 2>/dev/null || exit 0
+                    cmd_complete "$@" ;;
+                *) cmd_complete "$@" ;;
+            esac
+            ;;
+        *)        _dispatch_custom "$cmd" "$@" ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,95 @@
+#!/bin/sh
+# Test runner for fast-worktree.
+#
+# macOS ships bash 3.2; bats and the tool itself resolve `bash` via PATH,
+# so put Homebrew's bash first when present. On Linux the system bash is fine.
+[ -d /opt/homebrew/bin ] && PATH="/opt/homebrew/bin:$PATH"
+export PATH
+
+if ! bash -c '[ "${BASH_VERSINFO[0]}" -ge 4 ]'; then
+    echo "error: bash >= 4 required on PATH (brew install bash)" >&2
+    exit 1
+fi
+
+if ! command -v bats >/dev/null 2>&1; then
+    echo "error: bats not found (brew install bats-core)" >&2
+    exit 1
+fi
+
+# Convert hangs (leaked daemons, infinite loops, tmux fd inheritance) into
+# fast, attributable failures instead of stuck runs. Kept low: bats 1.14.0
+# also stalls for the FULL timeout after every *failing* test (its timeout
+# watchdog is only reaped on the passing path — the spurious
+# "bats-exec-test: kill: ... No such process" after a failure is that
+# watchdog firing late), so this value is a per-failure tax on red runs.
+# The slowest legitimate tests (cold go builds) finish in ~2s.
+BATS_TEST_TIMEOUT="${BATS_TEST_TIMEOUT:-15}"
+export BATS_TEST_TIMEOUT
+
+# Per-run tmux socket tag. Each test's isolated tmux server lives on a
+# fw-test-<tag>-<cksum> socket (see tests/shims/tmux). A test's own teardown
+# calls kill-server, but a test killed by BATS_TEST_TIMEOUT — or the whole
+# runner being SIGKILLed — skips teardown and leaks a live server. Enough of
+# those pile up to exhaust memory and take down the user's real tmux server.
+# The tag lets the sweep below reap ONLY this run's servers: it can never match
+# a concurrent run's tag (different PID) or the tagless `default` socket.
+FW_TEST_SOCK_TAG="run$$"
+export FW_TEST_SOCK_TAG
+
+# sweep_tmux — reap every tmux server this run started. Always -L a
+# fw-test-<tag>-* socket, so it is safe by construction (the user's `default`
+# server is untouchable). Also removes the stale socket file left behind.
+sweep_tmux() {
+    [ -n "$FW_TEST_SOCK_TAG" ] || return 0
+    for _swdir in "/tmp/tmux-$(id -u)" "${TMPDIR:-/tmp}/tmux-$(id -u)"; do
+        [ -d "$_swdir" ] || continue
+        for _swsock in "$_swdir/fw-test-$FW_TEST_SOCK_TAG-"*; do
+            [ -e "$_swsock" ] || continue
+            tmux -L "$(basename "$_swsock")" kill-server 2>/dev/null
+            rm -f "$_swsock"
+        done
+    done
+}
+trap sweep_tmux EXIT INT TERM
+
+cd "$(dirname "$0")/.."
+
+# Pre-run: reap orphaned fw-test servers the post-run sweep couldn't — a
+# SIGKILLed prior runner (trap never fired) or `bats` run directly (no run tag,
+# so untagged fw-test-<cksum> sockets the tagged sweep can't match). Age-gated,
+# so a concurrent run's fresh servers are never touched. See tests/reap-fw-test.
+./tests/reap-fw-test
+
+# The `core` target is the fast pre-commit tier: the smoke-tagged unit files,
+# run SERIALLY. For a small set GNU parallel's job-scheduling overhead dwarfs
+# the tests themselves (the core files run ~1.7s serial vs ~5.7s under
+# `parallel`), so we deliberately skip --jobs here. Tag a file into this set
+# with a top-of-file `# bats file_tags=core` directive. The full `./tests/run`
+# remains the pre-push gate.
+if [ "$1" = core ]; then
+    # Pass the tagged files explicitly instead of `-r tests/unit`: `-r` makes
+    # bats load and parse all unit files before filtering (~2.8s), whereas
+    # loading only the tagged files runs in ~1.8s. --filter-tags stays as a
+    # guard so that if a core file ever grows a per-test tag, only core runs.
+    core_files=$(grep -rl '^# bats file_tags=core' tests/unit)
+    # Not `exec`: the EXIT trap (sweep_tmux) must still fire after bats returns.
+    bats --filter-tags core $core_files
+    exit $?
+fi
+
+# Default target is the whole suite; a caller can pass specific files instead.
+if [ $# -eq 0 ]; then
+    set -- -r tests
+fi
+
+# bats parallelizes across test files, but only when GNU parallel is on PATH.
+# Use it when available (~13.9s -> ~8.8s on the unit suite; the gain is capped
+# by the largest single file, which bats can't split). Fall back to serial so
+# the suite still runs without this optional dependency. Tune with BATS_JOBS.
+if command -v parallel >/dev/null 2>&1; then
+    set -- --jobs "${BATS_JOBS:-8}" "$@"
+fi
+
+# Not `exec`: the EXIT trap (sweep_tmux) must still fire after bats returns.
+bats "$@"
+exit $?

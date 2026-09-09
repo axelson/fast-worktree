@@ -1,0 +1,43 @@
+#!/bin/sh
+# Test shim for tmux: everything runs on a dedicated test socket so the
+# suite can never touch the user's real tmux server or sessions. The socket
+# name is a checksum of $BATS_TEST_TMPDIR, which is unique per test — bats
+# runs files in parallel and every teardown calls kill-server, so a socket
+# shared any wider (the shim path was tried) lets one file's teardown kill
+# sessions of concurrently-running files. Outside bats (manual smoke tests)
+# it falls back to the shim path, which still isolates per checkout.
+#
+# $FW_TEST_SOCK_TAG (exported by tests/run, a per-run token) is folded in as
+# fw-test-<tag>-<cksum> so tests/run's post-run sweep can reap ONLY this run's
+# servers — never a concurrent run's (another worktree) or the user's default.
+# Unset (manual runs) it degrades to the historical fw-test-<cksum>.
+unset TMUX
+sock="fw-test-${FW_TEST_SOCK_TAG:+$FW_TEST_SOCK_TAG-}$(printf '%s' "${BATS_TEST_TMPDIR:-$(cd "$(dirname "$0")" && pwd -P)}" | cksum | cut -d' ' -f1)"
+# Capture log (opt-in): record each invocation's argv so tests can assert on
+# new-window / rename-window / send-keys / select-window without depending on
+# real tmux pane state (a cd keystroke's effect on pane_current_path is racy).
+# Logged before exec so the real command still runs on the test socket.
+if [ -n "${FW_TEST_TMUX_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FW_TEST_TMUX_LOG"
+fi
+for t in /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do
+    if [ -x "$t" ]; then
+        # Whichever command first touches a socket forks the tmux server, which
+        # daemonizes inheriting every fd it was launched with. bats blocks at
+        # exit until its fd 3 is closed by ALL descendants, so a server that
+        # outlives its test holds fd 3 open and hangs the whole run (this is the
+        # documented bats "background task keeps fd 3 open" trap). Pre-start the
+        # server with stdio at /dev/null and fd 3 closed, so it is born clean;
+        # the real command then attaches as a client and exits, releasing its
+        # own copies. Closing fd 3 on the real exec too covers the case where it,
+        # not the pre-start, is what forks the server. (Both are harmless outside
+        # bats, where fd 3 is simply not open.)
+        case "$1" in
+            start-server | kill-server) ;;
+            *) "$t" -L "$sock" start-server </dev/null >/dev/null 2>&1 3>&- || true ;;
+        esac
+        exec "$t" -L "$sock" "$@" 3>&-
+    fi
+done
+echo "tmux not found" >&2
+exit 127

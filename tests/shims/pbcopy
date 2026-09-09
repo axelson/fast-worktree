@@ -1,0 +1,10 @@
+#!/bin/sh
+# Test shim for macOS `pbcopy` (clipboard): records stdin so tests can assert
+# what was copied without touching the real clipboard.
+#   FW_TEST_PBCOPY_LOG — file to write the copied text to (each call appends)
+if [ -n "${FW_TEST_PBCOPY_LOG:-}" ]; then
+    cat >>"$FW_TEST_PBCOPY_LOG"
+else
+    cat >/dev/null
+fi
+exit 0

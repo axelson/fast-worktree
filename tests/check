@@ -1,0 +1,36 @@
+#!/bin/sh
+# Run the full fast-worktree check suite inside a Linux container — the same
+# image and the same commands CI runs. This is the single source of "does it
+# pass on Linux": CI calls it, and a developer on any OS calls it to reproduce
+# CI locally.
+#
+#   tests/check                              # ./tests/run && ./tests/lint (the CI default)
+#   tests/check ./tests/run tests/unit/x.bats   # scope to specific files
+#   tests/check ./tests/lint                 # just shellcheck
+#   tests/check bash                         # an interactive shell in the image
+#
+# The repo is bind-mounted, so local edits are picked up with no rebuild; the
+# image is rebuilt only when tests/docker/* changes (Docker layer caching makes
+# an unchanged rebuild near-instant).
+set -e
+
+cd "$(dirname "$0")/.."
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo "tests/check: docker is required but not found on PATH" >&2
+    exit 1
+fi
+
+IMAGE="${FW_TEST_IMAGE:-fast-worktree-test}"
+
+docker build -f tests/docker/Dockerfile -t "$IMAGE" .
+
+# Allocate a TTY only when we have one (interactive local use), so line-buffered
+# TAP output streams; in CI (no TTY) it runs non-interactively just like now.
+tty_flag=""
+[ -t 0 ] && [ -t 1 ] && tty_flag="-t"
+
+# shellcheck disable=SC2086  # $tty_flag is an intentional optional single flag
+exec docker run --rm -i $tty_flag \
+    -v "$PWD:/work" \
+    "$IMAGE" "$@"

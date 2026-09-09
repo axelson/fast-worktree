@@ -1,0 +1,10 @@
+cache/
+log/
+tmp/
+log.txt
+scripts/apfsclone/apfsclone
+.env.worktree
+cmd/subagent-parser/subagent-parser
+archived/felt-worktree/cmd/subagent-parser/subagent-parser
+.fw-summary.md
+worktree-notes.txt

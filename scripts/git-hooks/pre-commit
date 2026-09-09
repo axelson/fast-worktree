@@ -1,0 +1,47 @@
+#!/bin/sh
+# Pre-commit gate for fast-worktree: the fast tier — shellcheck + core unit
+# tests. Tuned to stay under a few seconds so it never discourages committing.
+#
+# Two deliberate scope cuts keep it fast:
+#   * shellcheck runs on the STAGED shell files only, not the whole tree
+#     (a full-tree pass is ~5.6s; a typical commit's staged files are <1s).
+#   * only the `core`-tagged unit files run, and serially — see `tests/run`.
+#
+# The full `./tests/lint` and `./tests/run` are the pre-push gate: run both
+# before pushing, since this hook no longer covers the whole tree or suite.
+# Bypass the hook for a work-in-progress commit with `git commit --no-verify`.
+#
+# Install once per clone (shared across all worktrees):
+#   git config core.hooksPath scripts/git-hooks
+# See DEVELOPMENT.md.
+set -e
+
+# Hooks run from the top level of the working tree; be explicit anyway so the
+# relative ./tests paths resolve regardless of how git invokes us.
+cd "$(git rev-parse --show-toplevel)"
+
+# Git exports GIT_DIR, GIT_INDEX_FILE, GIT_CONFIG, etc. into hooks. The test
+# suite spins up throwaway git repos, and those inherited vars would redirect
+# its `git init`/`commit` at *this* repo (config-lock errors, "branch already
+# exists"). Strip them now that we have the repo root, so the suite is hermetic.
+# shellcheck disable=SC2046  # word-splitting the var-name list is intended
+unset $(git rev-parse --local-env-vars)
+
+# Lint only the staged shell files that fall in the lint scope
+# (the `fast-worktree` entrypoint and lib/**.sh — matching `tests/lint`).
+# `-x` lets shellcheck follow `source` directives so each file resolves
+# variables defined in its siblings and lints correctly in isolation. xargs
+# parallelizes; the `-n` guard below skips it entirely when nothing shell-y is
+# staged (BSD xargs lacks GNU's `-r`), so a docs-only commit spends ~0ms here.
+staged=$(git diff --cached --name-only --diff-filter=ACM \
+    | grep -E '^(fast-worktree|lib/.*\.sh)$' || true)
+
+if [ -n "$staged" ]; then
+    echo "pre-commit: shellcheck (staged)…"
+    printf '%s\n' "$staged" | xargs -P8 -n1 shellcheck -x -s bash
+fi
+
+echo "pre-commit: core unit tests…"
+./tests/run core
+
+echo "pre-commit: ok"

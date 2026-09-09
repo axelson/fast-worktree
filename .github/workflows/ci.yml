@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux (containerized checks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # All deps, Postgres setup, the suite, and shellcheck live in the Linux
+      # test image and tests/check. Running it here means CI executes the exact
+      # same checks a developer runs locally with `tests/check` (or `make
+      # check`) — the container is the single source of truth for "passes on
+      # Linux". Docker is preinstalled on ubuntu-latest.
+      - name: Run checks in a Linux container
+        run: ./tests/check

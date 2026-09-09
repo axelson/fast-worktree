@@ -1,0 +1,8 @@
+#!/bin/sh
+# Test shim for the `caddy` binary: records each invocation so tests can assert
+# a reload happened (and with which config) without touching a real Caddy.
+#   FW_TEST_CADDY_LOG — file to append each invocation to
+if [ -n "${FW_TEST_CADDY_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FW_TEST_CADDY_LOG"
+fi
+exit 0

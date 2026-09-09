@@ -1,0 +1,9 @@
+#!/bin/sh
+# Test shim for the OS `open` command (the browser-open seam for `fw pr open`):
+# records each invocation so tests can assert the URL without launching a
+# browser.
+#   FW_TEST_OPEN_LOG — file to append each invocation to
+if [ -n "${FW_TEST_OPEN_LOG:-}" ]; then
+    printf '%s\n' "$*" >>"$FW_TEST_OPEN_LOG"
+fi
+exit 0
