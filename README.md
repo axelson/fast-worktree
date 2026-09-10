@@ -170,14 +170,38 @@ Run `fw` with no arguments (or `fw help`) for all the commands.
 `shelve`, `open-file`, `handoff` (`save`/`show`/`done`/`resume`), `handoffs`,
 `notify`, `logs`.
 
+## tmux shortcuts
+
+`fw` doesn't manage keybindings — the pickers are just commands, so you bind
+them however you like. `M-` is Alt (Option on macOS; enable "Use Option as Meta
+key" in your terminal). These are the bindings I keep in my `~/.tmux.conf`:
+
+```tmux
+# fast-worktree — root-table bindings (no prefix)
+bind-key -n 'M-o'   display-popup -E -w 80% -h 60% 'fw switch'                                  # worktree picker
+bind-key -n 'M-i'   display-popup -E -w 80% -h 60% -T ' claude sessions ' 'fw switch-claude || read -n1'  # live Claude session picker (all projects)
+bind-key -n 'M-O'   display-popup -E 'fw menu'                                                  # quick-actions menu
+bind-key -n 'M-;'   display-popup -E 'fw ss'                                                    # stack-switch picker
+bind-key -n 'C-S-o' display-popup -E 'fw switch-project'                                        # another project's main session
+bind-key -n "M-'"   run -b '~/bin/fw last --quiet'                                              # previously visited worktree
+bind-key -n 'M-_'   run -b '~/bin/fw switch main --quiet'                                       # jump to the main checkout
+```
+
+The last two use `run -b` (no popup) because they switch instantly with no
+picker; adjust the `~/bin/fw` path to wherever `fw` is on your PATH. `C-S-o`
+(Ctrl+Shift+o) only reaches tmux in terminals that support the newer key
+protocols (kitty, WezTerm, recent libvte) — rebind it if it doesn't fire.
+
 ## Requirements
 
 Supports macOS and Linux. Copies are near-instant on APFS (macOS) and on Linux
 filesystems with reflink support (btrfs/XFS); elsewhere you still get the
 workflow, just with plain copies.
 
-- **bash ≥ 4**, **git**, **tmux**, **fzf** — the core set. macOS ships
-  bash 3.2; `brew install bash`.
+- **bash ≥ 4**, **git**, **tmux**, **fzf ≥ 0.45** — the core set. macOS ships
+  bash 3.2; `brew install bash`. `fw switch`'s default refreshing picker uses
+  fzf's `transform` bind (0.45+); an older fzf leaves the picker working but
+  drops the live refresh and current-worktree preselection.
 - **gh** — only for the PR/CI commands.
 - **Graphite (`gt`)** — only when `stack_backend` resolves to `graphite`.
 - **PostgreSQL** — only when `db_source` is set.
